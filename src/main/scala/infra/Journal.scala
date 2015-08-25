@@ -1,6 +1,7 @@
 package infra
 
 import java.io._
+import java.nio.channels.FileChannel
 import java.nio.{ByteOrder, ByteBuffer}
 import java.util.concurrent.ScheduledExecutorService
 import com.twitter.util.{Time, Duration}
@@ -32,17 +33,19 @@ class Journal(file : File, scheduler : ScheduledExecutorService, period : Durati
     reader.position(writer.position)
   }
 
-  def read() : Option[QItem] = {
+  def read() : Option[QItem] = read(this.reader)
+
+  def read(reader : FileChannel) : Option[QItem] = {
     synchronized {
-      if (readHeader() < 0)
+      if (readHeader(reader) <= 0)
         return None
 
       val opcode = header.get()
       val addTime = Time.fromMilliseconds(header.getLong())
-      val dataSize = header.getInt()
+      val itemSize = header.getInt()
 
-      val data = readData(dataSize)
-      data match {
+      val item = readItem(itemSize, reader)
+      item match {
         case None =>
           throw BadItemException()
         case Some(bytes) =>
@@ -51,26 +54,44 @@ class Journal(file : File, scheduler : ScheduledExecutorService, period : Durati
     }
   }
 
-  def replay() : Unit = {
-    // TODO
+  def replay(maxMemSize : Long)(f : QItem => Unit) = {
+    var size = 0L
+    val replayer = new FileInputStream(file).getChannel
+    var setReaderPosition = true
+    while (replayer.position() < writer.position) {
+      if (setReaderPosition) {
+        reader.position(replayer.position())
+      }
+
+      read(replayer) match {
+        case Some(item) =>
+          if (size + item.data.length > maxMemSize) {
+            setReaderPosition = false
+          }
+          size += item.data.length
+          f(item)
+      }
+    }
+
+    replayer.close()
   }
 
-  private def readHeader() : Int = {
+  private def readHeader(reader : FileChannel) : Int = {
     header.clear()
     var x : Int = 0
     do {
       x = reader.read(header)
-    } while (header.position() < header.limit() && x >= 0)
+    } while (header.position() < header.limit() && x > 0)
     header.flip()
     x
   }
 
-  private def readData(dataSize : Int) : Option[Array[Byte]] = {
-    val buffer = ByteBuffer.allocate(dataSize)
+  private def readItem(size : Int, reader : FileChannel) : Option[Array[Byte]] = {
+    val buffer = ByteBuffer.allocate(size)
     var x : Int = 0
     do {
       x = reader.read(buffer)
-    } while (buffer.position() < buffer.limit() && x >= 0)
+    } while (buffer.position() < buffer.limit() && x > 0)
 
     if(x >= 0) Some(buffer.array()) else None
   }

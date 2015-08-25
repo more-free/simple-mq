@@ -7,7 +7,7 @@ import com.twitter.util.Duration
 import scala.concurrent.{Promise, Future}
 
 class PeriodicSyncFile(file : File, scheduler : ScheduledExecutorService, period : Duration) {
-  val writer = new FileOutputStream(file).getChannel
+  val writer = new FileOutputStream(file, true).getChannel
   val promises = new ConcurrentLinkedQueue[Promise[Unit]]()
   val fsyncTask = new FsyncTask()
   @volatile var closed = false

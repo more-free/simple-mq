@@ -12,17 +12,29 @@ class PersistentQueue(maxMemSize : Long, journal: Journal) {
 
   def start = {
     journal.start
+    replay
   }
 
   def stop = {
     journal.stop
   }
 
+  def replay = {
+    journal.replay(maxMemSize) {
+        item => item.opcode match {
+          case OP_ADD =>
+            add(item, true)
+          case OP_POP =>
+            pop(true)
+        }
+    }
+  }
+
   def add(data : Array[Byte]) : Unit = {
     add(QItem(OP_ADD, Time.now, data))
   }
 
-  def add(item : QItem) : Unit = {
+  def add(item : QItem, replaying : Boolean = false) : Unit = {
     synchronized {
       if (!isFillingBehind) {
         if(item.data.length + dataSize <= maxMemSize) {
@@ -30,17 +42,22 @@ class PersistentQueue(maxMemSize : Long, journal: Journal) {
           dataSize += item.data.length
         } else {
           isFillingBehind = true
-          journal.startFillBehind()
+
+          if (!replaying) {
+            journal.startFillBehind()
+          }
         }
       }
 
-      val future = journal.write(item)
-      // force fsync
-      future.value
+      if (!replaying) {
+        val future = journal.write(item)
+        // force fsync
+        future.value
+      }
     }
   }
 
-  def pop() : QItem = {
+  def pop(replaying :Boolean = false) : Option[QItem] = {
     synchronized {
       if (queue.isEmpty) {
         while (dataSize < maxMemSize && isFillingBehind) {
@@ -48,24 +65,31 @@ class PersistentQueue(maxMemSize : Long, journal: Journal) {
             case None =>  // end of file, caught up
               isFillingBehind = false
             case Some(item) =>
-              queue.add(item)
-              dataSize += item.data.length
+              if (item.opcode == Protocol.OP_ADD) {
+                queue.add(item)
+                dataSize += item.data.length
+              }
           }
         }
       }
 
-      val future = journal.write(QItem(OP_POP, Time.now, Array[Byte]()))
-      future.value
+      if (!replaying) {
+        val future = journal.write(QItem(OP_POP, Time.now, Array[Byte]()))
+        future.value
+      }
+
+      if (queue.isEmpty)
+        return None
 
       val top = queue.poll()
       dataSize -= top.data.length
-      top
+      Some(top)
     }
   }
 
-  def top() : QItem = {
+  def top() : Option[QItem] = {
     synchronized {
-      queue.peek()
+      if (queue.isEmpty) None else Some(queue.peek())
     }
   }
 }
